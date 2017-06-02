@@ -103,7 +103,7 @@ class Autoencoder:
 class VariationalAutoencoder:
     AVAILABLE_RECON_LOSSES = ['mse', 'mean_squared_error']
 
-    def __init__(self, input_dim, hidden_dims, decoder_hidden_dims=None, activation='relu', last_activation='linear', batch_norm=False, dropout_prob=None, denoising_prob=None):
+    def __init__(self, input_dim, hidden_dims, decoder_hidden_dims=None, activation='relu', last_activation='linear', batch_norm=False, dropout_prob=None, denoising_prob=None, recon_weight=1.0):
         self._input_dim = input_dim
         self._encoder_hidden_dims = hidden_dims[:-1]
         self._latent_dim = hidden_dims[-1]
@@ -113,6 +113,7 @@ class VariationalAutoencoder:
         self._batch_norm = batch_norm
         self._dropout_prob = dropout_prob
         self._denoising_prob = denoising_prob
+        self._recon_weight = recon_weight
         self._loss = None
 
         self._construct_model()
@@ -132,7 +133,7 @@ class VariationalAutoencoder:
 
         kl_loss = - 0.5 * K.sum(1 + self._z_log_var - K.square(self._z_mean) - K.exp(self._z_log_var), axis=-1)
 
-        return K.mean(kl_loss + recon_loss)
+        return K.mean(kl_loss + self._recon_weight*recon_loss)
 
     def _construct_model(self):
         # inputs for data and random
