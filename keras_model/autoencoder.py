@@ -1,8 +1,14 @@
+import copy
 import numpy as np
-from keras.models import Model, Sequential
+
+import sys, os, pickle, json
+
+from keras.models import Model, Sequential, load_model
 from keras.layers import Input, Dense, Lambda, Layer, BatchNormalization, Dropout
 from keras import metrics
 from keras import backend as K
+from keras import losses
+from keras.regularizers import l1_l2
 
 from sklearn.metrics import mean_squared_error
 
@@ -11,13 +17,16 @@ def instance_wise_model_mse(model, X):
     X_recon = model.predict(X)
     return np.array([mean_squared_error(true, recon) for true, recon in zip(X, X_recon)])
 
-class Autoencoder:
+class Autoencoder(object):
     """
     Autoencoder
     
     """
 
-    def __init__(self, input_dim, hidden_dims, decoder_hidden_dims=None, activation='relu', last_activation='linear', batch_norm=False, dropout_prob=None, denoising_prob=None):
+    def __init__(self, input_dim, hidden_dims, decoder_hidden_dims=None, 
+                 activation='relu', last_activation='linear',
+                  batch_norm=False, dropout_prob=None, denoising_prob=None, 
+                  reg_weight=0.0, reg1_weight=0.0):
         self._input_dim = input_dim
         self._encoder_hidden_dims = hidden_dims[:-1]
         self._latent_dim = hidden_dims[-1]
@@ -27,6 +36,8 @@ class Autoencoder:
         self._batch_norm = batch_norm
         self._dropout_prob = dropout_prob
         self._denoising_prob = denoising_prob
+        self._reg1_weight = reg1_weight
+        self._reg2_weight = reg_weight
 
         self._model = None
         self._encoder = None
@@ -38,33 +49,41 @@ class Autoencoder:
         input = Input(shape=(self._input_dim,))
 
         encoded = input
-        if self._denoising_prob is not None:
+        if self._denoising_prob is not None and self._denoising_prob > 0:
             encoded = Dropout(self._denoising_prob)(encoded)
-        for h_dim in self._encoder_hidden_dims:
-            encoded = Dense(h_dim, activation=self._activation)(encoded)
+        for h_dim in self._encoder_hidden_dims + [self._latent_dim]:
+            encoded = Dense(h_dim, 
+                            activation=self._activation, 
+                            kernel_regularizer=l1_l2(self._reg1_weight, self._reg2_weight))(encoded)
+
             if self._batch_norm:
                 encoded = BatchNormalization()(encoded)
-            if self._dropout_prob is not None:
+            if self._dropout_prob is not None and self._dropout_prob > 0:
                 encoded = Dropout(self._dropout_prob)(encoded)
 
-        # latent variable calculated from data
-        z = Dense(self._latent_dim, activation=self._activation)(encoded)
+        # latent variable for given data
+        z = encoded
 
         # latent variable directly given
         input_z = Input(shape=(self._latent_dim,))
 
         decoded = [z, input_z]
         for h_dim in self._decoder_hidden_dims:
-            decoding_layer = Dense(h_dim, activation=self._activation)
+            decoding_layer = Dense(h_dim, 
+                                   activation=self._activation, 
+                                   kernel_regularizer=l1_l2(self._reg1_weight, self._reg2_weight))
             decoded = [decoding_layer(each_tensor) for each_tensor in decoded]
+
             if self._batch_norm:
                 batch_layer = BatchNormalization()
                 decoded = [batch_layer(each_tensor) for each_tensor in decoded]
-            if self._dropout_prob is not None:
+            if self._dropout_prob is not None and self._dropout_prob > 0:
                 dropout_layer = Dropout(self._dropout_prob)
                 decoded = [dropout_layer(each_tensor) for each_tensor in decoded]
 
-        last_layer = Dense(self._input_dim, activation=self._last_activation)
+        last_layer = Dense(self._input_dim, 
+                           activation=self._last_activation,
+                           kernel_regularizer=l1_l2(self._reg1_weight, self._reg2_weight))
         decoded = [last_layer(each_tensor) for each_tensor in decoded]
 
         self._encoder = Model(input, z)
@@ -80,7 +99,24 @@ class Autoencoder:
     def compile(self, **kwargs):
         self._model.compile(**kwargs)
 
-    def fit(self, X, **kwargs):
+    def fit(self, X, pretrain=None, **kwargs):
+        if pretrain is not None:
+            layer_sizes = [l.output_shape for l in self._model.layers]
+            is_symm = np.array([f == b for f, b in zip(layer_sizes, layer_sizes[::-1])]).all()
+            if not is_symm:
+                raise Exception('pretrain for asymmetric network is not implemented')
+
+            pre_kwargs = copy.deepcopy(kwargs)
+            pre_kwargs['epochs'] = pretrain['epochs']
+
+            encoder_height = len(self._encoder.layers)
+            decoder_height = len(self._decoder.layers)
+            for i in range(2, encoder_height):
+                target_layers = self._encoder.layers[:i] + self._decoder.layers[(decoder_height-i+1):]
+                pre_ae = Sequential(target_layers)
+                pre_ae.compile(**pretrain['compile_args'])
+                pre_ae.fit(X, X, **pre_kwargs)
+
         return self._model.fit(X, X, **kwargs)
 
     def predict(self, X):
@@ -100,10 +136,10 @@ class Autoencoder:
         return -self.instance_wise_mse(X)
 
 
-class VariationalAutoencoder:
+class VariationalAutoencoder(object):
     AVAILABLE_RECON_LOSSES = ['mse', 'mean_squared_error']
 
-    def __init__(self, input_dim, hidden_dims, decoder_hidden_dims=None, activation='relu', last_activation='linear', batch_norm=False, dropout_prob=None, denoising_prob=None, recon_weight=1.0):
+    def __init__(self, input_dim, hidden_dims, decoder_hidden_dims=None, activation='relu', last_activation='linear', batch_norm=False, dropout_prob=None, denoising_prob=None):
         self._input_dim = input_dim
         self._encoder_hidden_dims = hidden_dims[:-1]
         self._latent_dim = hidden_dims[-1]
@@ -113,7 +149,6 @@ class VariationalAutoencoder:
         self._batch_norm = batch_norm
         self._dropout_prob = dropout_prob
         self._denoising_prob = denoising_prob
-        self._recon_weight = recon_weight
         self._loss = None
 
         self._construct_model()
@@ -133,7 +168,7 @@ class VariationalAutoencoder:
 
         kl_loss = - 0.5 * K.sum(1 + self._z_log_var - K.square(self._z_mean) - K.exp(self._z_log_var), axis=-1)
 
-        return K.mean(kl_loss + self._recon_weight*recon_loss)
+        return K.mean(kl_loss + recon_loss)
 
     def _construct_model(self):
         # inputs for data and random
@@ -142,14 +177,14 @@ class VariationalAutoencoder:
 
         # encoding
         encoded = input_x
-        if self._denoising_prob is not None:
+        if self._denoising_prob is not None and self._denoising_prob > 0:
             encoded = Dropout(self._denoising_prob)(encoded)
         for h_dim in self._encoder_hidden_dims + [self._latent_dim]:
             encoding_layer = Dense(h_dim, activation=self._activation)
             encoded = encoding_layer(encoded)
             if self._batch_norm:
                 encoded = BatchNormalization()(encoded)
-            if self._dropout_prob is not None:
+            if self._dropout_prob is not None and self._dropout_prob > 0:
                 encoded = Dropout(self._dropout_prob)(encoded)
 
         self._z_mean = Dense(self._latent_dim, activation='linear')(encoded)
@@ -164,7 +199,7 @@ class VariationalAutoencoder:
             if self._batch_norm:
                 batch_layer = BatchNormalization()
                 decoded = [batch_layer(each_tensor) for each_tensor in decoded]
-            if self._dropout_prob is not None:
+            if self._dropout_prob is not None and self._dropout_prob > 0:
                 dropout_layer = Dropout(self._dropout_prob)
                 decoded = [dropout_layer(each_tensor) for each_tensor in decoded]
 
@@ -243,64 +278,39 @@ class VariationalAutoencoder:
 
 
 class GuidedAutoencoder(Autoencoder):
-    def __init__(self, knn, knn_weight, **kwargs):
+    """
+    Embedding is guided by the number of clusters given by a parameter
+    """
+    def __init__(self, n_clusters, cls_loss_weight=1.0, **kwargs):
         super(GuidedAutoencoder, self).__init__(**kwargs)
-        self._knn = knn
-        self._knn_kernel = None
-        self._knn_weight = knn_weight
+        self._n_clusters = n_clusters
+        self._cls_loss_weight = cls_loss_weight
         self._loss = None
 
-        self._construct_network()
+        borders = np.round(np.linspace(0, self._latent_dim, self._n_clusters+1)).astype('int')
+        cluster_centers = []
+        for i, (left, right) in enumerate(zip(borders[:-1], borders[1:])):
+            cls_center = np.zeros(self._latent_dim)
+            cls_center[left:right] = 1.0 * (2*(i%2)-1)
+            cluster_centers.append(cls_center)
+        self._cluster_centers = np.array(cluster_centers)
 
     def _gae_loss(self, x, x_recon):
-        if self._loss in ['mse', 'mean_squared_error']:
-            recon_loss = self._input_dim * metrics.mean_squared_error(x, x_recon)
-        elif self._loss in ['binary_crossentropy']:
-            recon_loss = self._input_dim * metrics.binary_crossentropy(x, x_recon)
-        else:
-            assert False, 'unsupported loss={} in _vae_loss'.format(self._loss)
+        recon_loss_func = losses.get(self._loss)
+        recon_loss = K.mean(recon_loss_func(x, x_recon))
 
-        loc_loss = z;
+        cls_loss = 0
+        for mu in self._cluster_centers:
+            cls_loss += K.mean(metrics.mean_squared_error(self._z, mu))
+        cls_loss /= self._n_clusters
 
+        return recon_loss - self._cls_loss_weight*cls_loss
 
-        return K.mean(kl_loss + recon_loss)
+    def compile(self, **kwargs):
+        self._loss = kwargs.get('loss', 'mse')
+        kwargs['loss'] = self._gae_loss
 
-    def _construct_network(self):
-        input = Input(shape=(self._input_dim,))
-
-        encoded = input
-        if self._denoising_prob is not None:
-            encoded = Dropout(self._denoising_prob)(encoded)
-        for h_dim in self._encoder_hidden_dims:
-            encoded = Dense(h_dim, activation=self._activation)(encoded)
-            if self._batch_norm:
-                encoded = BatchNormalization()(encoded)
-            if self._dropout_prob is not None:
-                encoded = Dropout(self._dropout_prob)(encoded)
-
-        # latent variable calculated from data
-        z = Dense(self._latent_dim, activation=self._activation)(encoded)
-
-        # latent variable directly given
-        input_z = Input(shape=(self._latent_dim,))
-
-        decoded = [z, input_z]
-        for h_dim in self._decoder_hidden_dims:
-            decoding_layer = Dense(h_dim, activation=self._activation)
-            decoded = [decoding_layer(each_tensor) for each_tensor in decoded]
-            if self._batch_norm:
-                batch_layer = BatchNormalization()
-                decoded = [batch_layer(each_tensor) for each_tensor in decoded]
-            if self._dropout_prob is not None:
-                dropout_layer = Dropout(self._dropout_prob)
-                decoded = [dropout_layer(each_tensor) for each_tensor in decoded]
-
-        last_layer = Dense(self._input_dim, activation=self._last_activation)
-        decoded = [last_layer(each_tensor) for each_tensor in decoded]
-
-        self._encoder = Model(input, encoded)
-        self._decoder = Model(input_z, decoded[1])
-        self._model = Model(input, decoded[0])
+        self._model.compile(**kwargs)
 
 
 #################################################################################
@@ -311,7 +321,7 @@ sys.path.append('autoencoder_yoon')
 from ae import AE
 from vae import VAE
 
-class AE_Wrapper:
+class AE_Wrapper(object):
     def __init__(self, **kwargs):
         self.ae_obj = AE(**kwargs)
         self.model = self.ae_obj.model()
