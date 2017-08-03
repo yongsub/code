@@ -316,48 +316,48 @@ class GuidedAutoencoder(Autoencoder):
 #################################################################################
 # Wrapper for dr. yoon's implementation
 #################################################################################
-import sys
-sys.path.append('autoencoder_yoon')
-from ae import AE
-from vae import VAE
-
-class AE_Wrapper(object):
-    def __init__(self, **kwargs):
-        self.ae_obj = AE(**kwargs)
-        self.model = self.ae_obj.model()
-
-    def fit(self, X, **kwargs):
-        return self.model.fit(X, X, **kwargs)
-
-    def compile(self, **kwargs):
-        self.model.compile(**kwargs)
-
-    def summary(self, enter=0):
-        self.model.summary()
-        print ''.join(['\n' for _ in range(enter)])
-
-    def predict(self, X):
-        return self.model.predict(X)
-
-    def encode(self, X):
-        return self.ae_obj.encoder().predict(X)
-
-    def decision_function(self, X):
-        return -instance_wise_model_mse(self.model, X)
-
-
-class VAE_Wrapper(AE_Wrapper):
-    def __init__(self, **kwargs):
-        self.ae_obj = VAE(**kwargs)
-        self.model = self.ae_obj.model()
-        self.vae_loss = self.ae_obj.loss
-
-    def compile(self, **kwargs):
-        kwargs['loss'] = self.vae_loss
-        self.model.compile(**kwargs)
-
-    def decision_function(self, X):
-        return -instance_wise_model_mse(self.model, X)
+#import sys
+#sys.path.append('autoencoder_yoon')
+#from ae import AE
+#from vae import VAE
+#
+#class AE_Wrapper(object):
+#    def __init__(self, **kwargs):
+#        self.ae_obj = AE(**kwargs)
+#        self.model = self.ae_obj.model()
+#
+#    def fit(self, X, **kwargs):
+#        return self.model.fit(X, X, **kwargs)
+#
+#    def compile(self, **kwargs):
+#        self.model.compile(**kwargs)
+#
+#    def summary(self, enter=0):
+#        self.model.summary()
+#        print ''.join(['\n' for _ in range(enter)])
+#
+#    def predict(self, X):
+#        return self.model.predict(X)
+#
+#    def encode(self, X):
+#        return self.ae_obj.encoder().predict(X)
+#
+#    def decision_function(self, X):
+#        return -instance_wise_model_mse(self.model, X)
+#
+#
+#class VAE_Wrapper(AE_Wrapper):
+#    def __init__(self, **kwargs):
+#        self.ae_obj = VAE(**kwargs)
+#        self.model = self.ae_obj.model()
+#        self.vae_loss = self.ae_obj.loss
+#
+#    def compile(self, **kwargs):
+#        kwargs['loss'] = self.vae_loss
+#        self.model.compile(**kwargs)
+#
+#    def decision_function(self, X):
+#        return -instance_wise_model_mse(self.model, X)
 
 
 
